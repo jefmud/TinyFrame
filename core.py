@@ -170,6 +170,24 @@ class TinyFrame:
             return view
         return decorator
 
+    def add_route(self, path=None, callback=None, methods=None, name=None):
+        """
+        A slightly simpler way of adding a non-decorator specified route.
+        
+          add_route(path, callback, methods, name):
+          
+          path - the path including route specifier
+          callback - the view function
+          methods - ["GET","POST", ...] defaults to ["GET"]
+          name - (unused) for future versions that support url_for()
+        """
+        if methods is None:
+            methods = ['GET']
+        if path and callback:
+            self.routes.append( (compile_route(path), callback, methods) )
+        else:
+            raise ValueError("TinyFrame.add_route requires both a path and view_function callback")
+
     def render_template(self, template_name, **context):
         """
         Render a template using Jinja2.
