@@ -5,7 +5,7 @@
 #
 # lots of technical debt owed to the Pallets Project, Ben Darnell, Armin Ronacher, Marcel Helkamp
 #
-# (C) 2025
+# (C) 2025 Jeff Muday, MIT License
 #
 #################################################################################################
 import re
