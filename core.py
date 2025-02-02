@@ -54,10 +54,50 @@ class WSGIRequest:
             self.headers["Content-Type"] = environ["CONTENT_TYPE"]
         if "CONTENT_LENGTH" in environ:
             self.headers["Content-Length"] = environ["CONTENT_LENGTH"]
+        from http import cookies
         self.cookies = cookies.SimpleCookie()
         if "HTTP_COOKIE" in environ:
             self.cookies.load(environ["HTTP_COOKIE"])
         self.session = None
+        # Internal cache for form data so that the input stream is read only once.
+        self._form = None
+
+    def get_post_data(self):
+        """
+        Read and return the raw POST data from the request.
+        (This method is provided for cases where you need the unparsed data.)
+        """
+        try:
+            length = int(self.environ.get('CONTENT_LENGTH', 0))
+        except (ValueError, TypeError):
+            length = 0
+        return self.environ['wsgi.input'].read(length)
+
+    @property
+    def form(self):
+        """
+        Parse the POST data (assumed to be URL-encoded) and return it as a dictionary.
+        If a key has a single value, it returns that value; otherwise, it returns a list.
+        This property caches its value so that the input stream is READ ONLY ONCE.
+        (I made a mistake implementing this function, but fixed now)
+        """
+        if self._form is None:
+            # Only attempt to read the form if this is a POST request.
+            if self.method.upper() == "POST":
+                try:
+                    length = int(self.environ.get('CONTENT_LENGTH', 0))
+                except (ValueError, TypeError):
+                    length = 0
+                # Read the raw POST data.
+                raw_data = self.environ['wsgi.input'].read(length)
+                # Decode the data into a string (assuming UTF-8) and parse it.
+                parsed = parse_qs(raw_data.decode('utf-8'))
+                # Convert parsed values: if a key's value list has one item, use that item.
+                self._form = {key: value[0] if len(value) == 1 else value
+                              for key, value in parsed.items()}
+            else:
+                self._form = {}
+        return self._form
 
 class WSGIResponse:
     def __init__(self):
