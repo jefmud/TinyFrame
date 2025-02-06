@@ -103,6 +103,7 @@ class WSGIResponse:
     def __init__(self):
         self._headers = {}
         self._cookies = cookies.SimpleCookie()
+        self.status_code = 200  # Default status code
 
     def set_header(self, key, value):
         self._headers[key] = value
@@ -111,64 +112,81 @@ class WSGIResponse:
         self._cookies[key] = value
         self._cookies[key]["path"] = path
 
+    def redirect(self, location, status_code=302):
+        """
+        Set up a redirect response.
+
+        Parameters:
+          location (str): The URL to redirect to.
+          status_code (int): The HTTP status code for the redirect (default is 302).
+        """
+        self.status_code = status_code
+        self.set_header("Location", location)
+
 # ------------------------------
 # Class-Based Views Base Class
 # ------------------------------
-class TinyFrameView:
+class ClassView:
     """
-    Base class for class-based views in TinyFrame.
-    Subclass this and define methods named after HTTP verbs (in lowercase)
-    such as get(), post(), etc.
+    Base class for class-based views.
     """
     def dispatch_request(self, request, response, **kwargs):
+        """
+        Dispatch the request to the appropriate method based on the HTTP method.
+        """
         method = request.method.lower()
-        if not hasattr(self, method):
+        if hasattr(self, method):
+            return getattr(self, method)(request, response, **kwargs)
+        else:
+            # If the method is not implemented, return a 405 Method Not Allowed
             return "405 Method Not Allowed", 405
-        handler = getattr(self, method)
-        return handler(request, response, **kwargs)
 
+    @classmethod
+    def get_supported_methods(cls):
+        """
+        Return a list of HTTP methods supported by this view.
+        """
+        methods = []
+        for method in ['get', 'post', 'put', 'delete', 'patch', 'head', 'options']:
+            if hasattr(cls, method):
+                methods.append(method.upper())
+        return methods
 # ------------------------------
 # TinyFrame Web Framework Class with Multiple Server Support
 # ------------------------------
 class TinyFrame:
     def __init__(self, template_folder='templates'):
-        # Store routes as a list of tuples: (compiled_regex, view_function, allowed_methods)
         self.routes = []
-        # In-memory session store: session_id -> session data dictionary.
         self.sessions = {}
-        # Set up Jinja2 environment for templating.
         self.jinja_env = Environment(loader=FileSystemLoader(template_folder))
 
-    def route(self, route_str, methods=["GET"]):
+    def route(self, route_str, methods=None):
         """
         A decorator to register a view for a given route.
 
         If used on a function, it registers that function.
-        If used on a class that is a subclass of TinyFrameView, it wraps the class
+        If used on a class that is a subclass of ClassView, it wraps the class
         so that an instance is created and dispatch_request() is called.
-
-        Example usage:
-
-            @app.route('/myview')
-            class MyView(TinyFrameView):
-                def get(self, request, response):
-                    return "GET route"
-                def post(self, request, response):
-                    return "POST route"
         """
         def decorator(view):
             compiled = compile_route(route_str)
-            # If view is a class-based view, wrap it.
-            if isinstance(view, type) and issubclass(view, TinyFrameView):
+            if isinstance(view, type) and issubclass(view, ClassView):
                 def view_func(request, response, **kwargs):
                     view_instance = view()
                     return view_instance.dispatch_request(request, response, **kwargs)
-                allowed_methods = methods
+                # Use the supported methods from the ClassView
+                allowed_methods = view.get_supported_methods()
                 self.routes.append((compiled, view_func, allowed_methods))
             else:
-                self.routes.append((compiled, view, methods))
+                # For function-based views, use the provided methods or default to ["GET"]
+                if methods is None:
+                    allowed_methods = ["GET"]
+                else:
+                    allowed_methods = methods
+                self.routes.append((compiled, view, allowed_methods))
             return view
         return decorator
+
 
     def add_route(self, path=None, callback=None, methods=None, name=None):
         """
@@ -195,6 +213,18 @@ class TinyFrame:
         template = self.jinja_env.get_template(template_name)
         return template.render(**context)
 
+    def redirect(self, location, status_code=302):
+        """
+        Create a redirect response.
+
+        Parameters:
+          location (str): The URL to redirect to.
+          status_code (int): The HTTP status code for the redirect (default is 302).
+        """
+        response = WSGIResponse()
+        response.redirect(location, status_code)
+        return response  # Returning the response object
+
     def _get_session(self, request, response):
         """
         Retrieve an existing session (via a cookie) or create a new one.
@@ -210,6 +240,7 @@ class TinyFrame:
             response.set_cookie("session_id", session_id)
         return session
 
+
     def _handle_request(self, request, response):
         """
         Iterate over registered routes. If a route pattern matches the request path,
@@ -224,10 +255,22 @@ class TinyFrame:
                 found_route = True
                 if request.method.upper() in [m.upper() for m in methods]:
                     kwargs = match.groupdict()
-                    return view(request, response, **kwargs), 200
+                    result = view(request, response, **kwargs)
+                    
+                    # If the view returns a WSGIResponse object (like a redirect)
+                    if isinstance(result, WSGIResponse):
+                        return "", result.status_code, result  # Redirect or special response handling
+                    
+                    elif isinstance(result, tuple):
+                        return result[0], result[1], response  # Handles (body, status_code)
+                    
+                    else:
+                        return result, response.status_code, response  # Default case
+
         if found_route:
-            return "405 Method Not Allowed", 405
-        return None, None
+            return "405 Method Not Allowed", 405, response
+        return None, None, response
+
 
     # ------------------------------
     # WSGI Application Interface
@@ -236,28 +279,35 @@ class TinyFrame:
         req = WSGIRequest(environ)
         res = WSGIResponse()
         req.session = self._get_session(req, res)
-        body, status = self._handle_request(req, res)
+
+        body, status, res = self._handle_request(req, res)
+
         if body is None:
             status = 404
             body = "404 Not Found"
+
         status_message = self._http_status_message(status)
         headers = [("Content-Type", "text/html")]
+
+        # Include any headers set in the response object
         for key, value in res._headers.items():
             headers.append((key, value))
+
+        # Handle cookies
         for morsel in res._cookies.values():
             headers.append(("Set-Cookie", morsel.OutputString()))
+
         start_response(f"{status} {status_message}", headers)
+
+        # If it's a redirect, we don't need a body
+        if status in [301, 302, 303, 307, 308]:
+            return [b""]
+
         if isinstance(body, str):
-            body = body.encode("utf-8")
+            body = body.encode("utf-8")  # Convert string to bytes
+
         return [body]
 
-    def _http_status_message(self, status):
-        messages = {
-            200: "OK",
-            404: "Not Found",
-            405: "Method Not Allowed"
-        }
-        return messages.get(status, "OK")
 
     # ------------------------------
     # Unified Run Method Supporting Multiple Servers
