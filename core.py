@@ -14,6 +14,8 @@ from http import cookies
 from urllib.parse import urlparse, parse_qs
 from jinja2 import Environment, FileSystemLoader
 
+__version__ = 0.4
+
 # ------------------------------
 # Helpers for Compiling Dynamic Routes
 # ------------------------------
@@ -157,35 +159,45 @@ class ClassView:
 class TinyFrame:
     def __init__(self, template_folder='templates'):
         self.routes = []
+        self.named_routes = {}  # Store named routes
         self.sessions = {}
         self.jinja_env = Environment(loader=FileSystemLoader(template_folder))
 
-    def route(self, route_str, methods=None):
-        """
-        A decorator to register a view for a given route.
-
-        If used on a function, it registers that function.
-        If used on a class that is a subclass of ClassView, it wraps the class
-        so that an instance is created and dispatch_request() is called.
-        """
+    def route(self, route_str, methods=None, name=None):
         def decorator(view):
+            route_name = name or view.__name__  # Use provided name or default to function name
             compiled = compile_route(route_str)
-            if isinstance(view, type) and issubclass(view, ClassView):
-                def view_func(request, response, **kwargs):
-                    view_instance = view()
-                    return view_instance.dispatch_request(request, response, **kwargs)
-                # Use the supported methods from the ClassView
-                allowed_methods = view.get_supported_methods()
-                self.routes.append((compiled, view_func, allowed_methods))
-            else:
-                # For function-based views, use the provided methods or default to ["GET"]
-                if methods is None:
-                    allowed_methods = ["GET"]
-                else:
-                    allowed_methods = methods
-                self.routes.append((compiled, view, allowed_methods))
+            allowed_methods = methods if methods else ["GET"]
+            
+            self.routes.append((compiled, view, allowed_methods))
+            self.named_routes[route_name] = {
+                'pattern': route_str,
+                'compiled': compiled,
+                'view': view
+            }
             return view
         return decorator
+
+    def url_for(self, route_name, **params):
+        if route_name not in self.named_routes:
+            raise ValueError(f"No route named '{route_name}' found.")
+
+        pattern = self.named_routes[route_name]['pattern']
+        
+        # Replace dynamic segments with provided parameters
+        def repl(match):
+            param_name = match.group(2)
+            if param_name in params:
+                return str(params.pop(param_name))
+            raise ValueError(f"Missing parameter '{param_name}' for route '{route_name}'.")
+
+        url = re.sub(r'<(path:)?(\w+)>', repl, pattern)
+
+        # Append remaining params as query string
+        if params:
+            url += '?' + urlencode(params)
+
+        return url
 
 
     def add_route(self, path=None, callback=None, methods=None, name=None):
@@ -366,7 +378,7 @@ class TinyFrame:
         511: "Network Authentication Required",
         }
         return status_messages.get(status_code, "Unknown Status Code")
-        
+
     # ------------------------------
     # Unified Run Method Supporting Multiple Servers
     # ------------------------------
